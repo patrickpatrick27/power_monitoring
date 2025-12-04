@@ -20,7 +20,7 @@ FEED_IDS = {
 FEATURES = ["voltage", "current", "energy_kwh", "pf", "frequency"]
 PARAMS = ["voltage", "current", "power", "energy_kwh", "frequency", "pf"]
 TIMESTEPS = 5  # Match your training config
-PESO_PER_KWH = 11.5  # Average rate from Philippines Dec 2024 (update as needed; sources: Meralco ~11.5-12 PHP/kWh)
+PESO_PER_KWH = 13  # Average rate from Philippines Dec 2024 (update as needed; sources: Meralco ~11.5-12 PHP/kWh)
 
 # --- LOAD MODELS (Cached for performance) ---
 @st.cache_resource
