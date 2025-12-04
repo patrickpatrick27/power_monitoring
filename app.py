@@ -21,44 +21,6 @@ FEATURES = ["voltage", "current", "energy_kwh", "pf", "frequency"]
 PARAMS = ["voltage", "current", "power", "energy_kwh", "frequency", "pf"]
 TIMESTEPS = 5  # Match your training config
 PESO_PER_KWH = 13  # Average rate from Philippines Dec 2024 (update as needed; sources: Meralco ~11.5-12 PHP/kWh)
-HIGH_USAGE_THRESHOLD_W = 500.0  # Average power (W) threshold for high usage alert over range
-
-# Custom CSS for colors and background placeholder
-st.markdown("""
-    <style>
-    /* Main background placeholder (update url for actual image) */
-    .stApp {
-        background-image: url("https://example.com/your-background.jpg");  /* Placeholder - replace with your image URL */
-        background-size: cover;
-        background-repeat: no-repeat;
-        background-position: center;
-    }
-    /* Sidebar colors */
-    section[data-testid="stSidebar"] {
-        background-color: #F0F2F6;  /* Light gray */
-    }
-    /* Metric colors */
-    div[data-testid="metric-container"] {
-        background-color: #FFFFFF;  /* White background for metrics */
-        border: 1px solid #FF5733;  /* Orange border */
-        padding: 5% 5% 5% 10%;
-        border-radius: 5px;
-        color: #262730;  /* Dark text */
-    }
-    /* Button and selectbox colors */
-    div.stButton > button {
-        background-color: #FF5733;  /* Orange */
-        color: white;
-    }
-    div.stSelectbox > label {
-        color: #262730;
-    }
-    /* Chart colors (optional override) */
-    .stLineChart {
-        border: 1px solid #33FF57;  /* Green border for charts */
-    }
-    </style>
-""", unsafe_allow_html=True)
 
 # --- LOAD MODELS (Cached for performance) ---
 @st.cache_resource
@@ -160,13 +122,6 @@ def forecast_monthly(df_hist, duration_days, interval):
     monthly_peso = monthly_kwh * PESO_PER_KWH
     return monthly_kwh, monthly_peso
 
-# --- 8. CHECK HIGH USAGE OVER RANGE ---
-def check_high_usage(df_hist):
-    avg_power = df_hist['power'].mean()
-    if avg_power > HIGH_USAGE_THRESHOLD_W:
-        return True, avg_power
-    return False, avg_power
-
 # --- DASHBOARD UI (All in one page) ---
 st.set_page_config(page_title="Power Monitoring", page_icon="⚡", layout="wide")
 st.title("⚡ Smart Home Energy Tracker")
@@ -177,7 +132,7 @@ selected_model = st.sidebar.selectbox("Select Model", ["Random Forest", "XGBoost
 use_live_data = st.sidebar.checkbox("Use Live Data", value=True)
 
 st.sidebar.subheader("Select Date Range")
-start_date = st.sidebar.date_input("Start Date", value=date.today() - timedelta(days=365))  # Default to longest: last 365 days
+start_date = st.sidebar.date_input("Start Date", value=date.today() - timedelta(days=1))
 end_date = st.sidebar.date_input("End Date", value=date.today())
 
 if start_date > end_date:
@@ -196,10 +151,6 @@ show_params = st.sidebar.checkbox("Show Parameters", value=True)
 show_predictions = st.sidebar.checkbox("Show Model Predictions", value=False)
 show_graphs = st.sidebar.checkbox("Show Graphs", value=True)
 show_forecast = st.sidebar.checkbox("Show Monthly Forecast", value=True)
-
-# Refresh button
-if st.sidebar.button("Refresh Data"):
-    st.experimental_rerun()
 
 # Fetch Data
 if use_live_data:
@@ -243,8 +194,8 @@ if show_params:
         value = live_values.get(p, 0.0) if use_live_data else features_dict.get(p, live_power if p == "power" else 0.0)
         cols[i % 3].metric(p.capitalize().replace("_kwh", " (kWh)"), f"{value:.2f}")
 
-# --- AI Recommendations ---
-st.subheader("User Recommendations")
+# --- User Recommendations ---
+st.subheader("🤖 User Recommendations")
 if pred_power > 1500:
     st.error("⚠️ **High Load Predicted:** Heavy appliances may be active (>1.5kW).")
 elif pred_power > 200:
@@ -324,14 +275,6 @@ if show_forecast and not df_hist.empty:
     col_f1, col_f2 = st.columns(2)
     col_f1.metric("Projected Monthly kWh", f"{monthly_kwh:.2f}")
     col_f2.metric("Projected Monthly Cost (PHP)", f"{monthly_peso:.2f}")
-    st.info(f"Assumption: Usage over selected {duration_days} days repeats for 30-day month at {PESO_PER_KWH} PHP/kWh.")
+    st.info(f"Assumption: Usage over selected {duration_days} days repeats for 30-day month at {PESO_PER_KWH} PHP/kWh (current avg rate).")
 
-# --- High Usage Recommendation Over Range ---
-if not df_hist.empty:
-    is_high, avg_power = check_high_usage(df_hist)
-    if is_high:
-        st.error(f"⚠️ **High Usage Alert Over Range:** Average power {avg_power:.1f} W exceeds threshold. Consider reducing appliance use to save costs.")
-    else:
-        st.success("✅ **Good Usage:** Average power is efficient over the selected range.")
-
-st.info("Tip: Use checkboxes in sidebar to filter views. For forecasting, select a week to extrapolate to month. Default is last 365 days for longest data.")
+st.info("Tip: Use checkboxes in sidebar to filter views. For forecasting, select a week to extrapolate to month.")
