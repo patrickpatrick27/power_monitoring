@@ -4,6 +4,7 @@ import requests
 import numpy as np
 import joblib
 from datetime import datetime, timedelta, date
+from dateutil.relativedelta import relativedelta
 from tensorflow.keras.models import load_model
 
 # --- CONFIGURATION ---
@@ -21,7 +22,6 @@ FEATURES = ["voltage", "current", "energy_kwh", "pf", "frequency"]
 PARAMS = ["voltage", "current", "power", "energy_kwh", "frequency", "pf"]
 TIMESTEPS = 5  # Match your training config
 PESO_PER_KWH = 13  # Average rate from Philippines (as of December 2025)
-FORECAST_INTERVAL = 3600  # Hourly, in seconds
 
 # --- LOAD MODELS (Cached for performance) ---
 @st.cache_resource
@@ -114,8 +114,8 @@ def predict_with_lstm(recent_df, scaler_X, scaler_y):
     y = scaler_y.inverse_transform(y_scaled)[0][0]
     return max(0, y)
 
-# --- 6.5 FORECAST NEXT WEEK WITH LSTM ---
-def forecast_next_week_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
+# --- 6.5 FORECAST NEXT PERIOD WITH LSTM ---
+def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
     if len(df_past) < TIMESTEPS:
         return pd.DataFrame()  # Not enough data
     
@@ -190,18 +190,43 @@ if start_date > end_date:
 duration_days = (end_date - start_date).days + 1
 selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
 
-# Dynamic interval
+# Dynamic interval for main history
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
 
-st.sidebar.subheader("Forecast Next Week")
-enable_forecast = st.sidebar.checkbox("Enable Next Week Forecast", value=False)
+st.sidebar.subheader("Forecast Next Period")
+enable_forecast = st.sidebar.checkbox("Enable Next Period Forecast", value=False)
 if enable_forecast:
-    past_start = st.sidebar.date_input("Start of Past Week", value=date(2025, 12, 1))
-    past_end = past_start + timedelta(days=6)
-    forecast_start = past_end + timedelta(days=1)
-    forecast_end = forecast_start + timedelta(days=6)
-    st.sidebar.info(f"Predicting {forecast_start} to {forecast_end} based on {past_start} to {past_end}")
+    forecast_period = st.sidebar.selectbox("Forecast Period", ["Daily", "Weekly", "Monthly", "Yearly"])
+    past_start = st.sidebar.date_input("Start of Past Period", value=date(2025, 12, 1))
+    
+    # Calculate past_end and forecast dates based on period
+    if forecast_period == "Daily":
+        past_end = past_start
+        forecast_start = past_end + timedelta(days=1)
+        forecast_end = forecast_start
+        forecast_interval = 3600  # Hourly for day (24 steps)
+        period_label = "Day"
+    elif forecast_period == "Weekly":
+        past_end = past_start + timedelta(days=6)
+        forecast_start = past_end + timedelta(days=1)
+        forecast_end = forecast_start + timedelta(days=6)
+        forecast_interval = 3600 * 4  # 4-hourly for week (~42 steps)
+        period_label = "Week"
+    elif forecast_period == "Monthly":
+        past_end = past_start + relativedelta(months=1, days=-1)
+        forecast_start = past_end + timedelta(days=1)
+        forecast_end = forecast_start + relativedelta(months=1, days=-1)
+        forecast_interval = 86400  # Daily for month (~30 steps)
+        period_label = "Month"
+    else:  # Yearly
+        past_end = past_start + relativedelta(years=1, days=-1)
+        forecast_start = past_end + timedelta(days=1)
+        forecast_end = forecast_start + relativedelta(years=1, days=-1)
+        forecast_interval = 86400 * 30  # Monthly for year (~12 steps)
+        period_label = "Year"
+    
+    st.sidebar.info(f"Predicting next {forecast_period.lower()} ({forecast_start} to {forecast_end}) based on {past_start} to {past_end}")
 
 st.sidebar.subheader("Filter Views")
 show_params = st.sidebar.checkbox("Show Parameters", value=True)
@@ -233,17 +258,17 @@ with st.spinner('Fetching historical data...'):
 df_past = pd.DataFrame()
 df_actual_forecast = pd.DataFrame()
 if enable_forecast:
-    with st.spinner('Fetching past week data...'):
+    with st.spinner('Fetching past period data...'):
         df_past = get_full_history_data(
             datetime.combine(past_start, datetime.min.time()),
             datetime.combine(past_end, datetime.max.time()),
-            FORECAST_INTERVAL
+            forecast_interval
         )
-    with st.spinner('Fetching actual forecast week data...'):
+    with st.spinner('Fetching actual forecast period data...'):
         df_actual_forecast = get_full_history_data(
             datetime.combine(forecast_start, datetime.min.time()),
             datetime.combine(forecast_end, datetime.max.time()),
-            FORECAST_INTERVAL
+            forecast_interval
         )
     if df_past.empty or df_actual_forecast.empty:
         st.warning("Insufficient data for forecasting. Check date range or API.")
@@ -262,12 +287,12 @@ elif selected_model == "XGBoost":
 else:
     pred_power = predict_with_lstm(recent_df, scaler_X, scaler_y)
 
-# --- Forecast Next Week ---
+# --- Forecast Next Period ---
 df_forecast = pd.DataFrame()
 if enable_forecast and not df_past.empty:
     num_steps = len(df_actual_forecast)  # Match actual points
     with st.spinner('Generating forecast...'):
-        df_forecast = forecast_next_week_lstm(df_past, num_steps, FORECAST_INTERVAL, scaler_X, scaler_y)
+        df_forecast = forecast_next_period_lstm(df_past, num_steps, forecast_interval, scaler_X, scaler_y)
 
 # --- Display 6 Parameters (if selected) ---
 if show_params:
@@ -322,7 +347,7 @@ if not df_hist.empty and show_graphs:
     st.metric("Avg Predicted Power (Range)", avg_pred)
 
     # Graphs in Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed", "Week Forecast"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed", "Period Forecast"])
 
     with tab1:
         st.markdown("### Power Consumption (Watts)")
@@ -350,7 +375,7 @@ if not df_hist.empty and show_graphs:
 
     with tab4:
         if not df_forecast.empty:
-            st.markdown("### Actual vs Predicted Power (Next Week)")
+            st.markdown(f"### Actual vs Predicted Power (Next {period_label})")
             compare_df = df_actual_forecast[['power']].join(df_forecast, how='outer')
             compare_df.columns = ['Actual Power', 'Predicted Power']
             st.line_chart(compare_df)
@@ -369,4 +394,4 @@ if show_forecast and not df_hist.empty:
     col_f2.metric("Projected Monthly Cost (PHP)", f"{monthly_peso:.2f}")
     st.info(f"Assumption: Usage over selected {duration_days} days repeats for 30-day month at {PESO_PER_KWH} PHP/kWh (current avg rate).")
 
-st.info("Tip: Use checkboxes in sidebar to filter views. For forecasting, select a week to extrapolate to month.")
+st.info("Tip: Use checkboxes in sidebar to filter views. For forecasting, select a period to extrapolate.")
