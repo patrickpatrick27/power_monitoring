@@ -21,6 +21,7 @@ FEATURES = ["voltage", "current", "energy_kwh", "pf", "frequency"]
 PARAMS = ["voltage", "current", "power", "energy_kwh", "frequency", "pf"]
 TIMESTEPS = 5  # Match your training config
 PESO_PER_KWH = 13  # Average rate from Philippines (as of December 2025)
+FORECAST_INTERVAL = 3600  # Hourly, in seconds
 
 # --- LOAD MODELS (Cached for performance) ---
 @st.cache_resource
@@ -113,6 +114,53 @@ def predict_with_lstm(recent_df, scaler_X, scaler_y):
     y = scaler_y.inverse_transform(y_scaled)[0][0]
     return max(0, y)
 
+# --- 6.5 FORECAST NEXT WEEK WITH LSTM ---
+def forecast_next_week_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
+    if len(df_past) < TIMESTEPS:
+        return pd.DataFrame()  # Not enough data
+    
+    # Constants from last past data point
+    last_row = df_past.iloc[-1]
+    voltage_const = last_row['voltage']
+    pf_const = last_row['pf']
+    frequency_const = last_row['frequency']
+    current_last = last_row['current']
+    energy_last = last_row['energy_kwh']
+    
+    # Start with last TIMESTEPS features
+    recent_features = df_past[FEATURES].tail(TIMESTEPS).values
+    
+    predictions = []
+    current_time = df_past.index[-1] + timedelta(seconds=interval_sec)
+    
+    for _ in range(num_steps):
+        # Predict next power
+        X_scaled = scaler_X.transform(recent_features)
+        X_lstm = X_scaled.reshape(1, TIMESTEPS, len(FEATURES))
+        y_scaled = lstm_model.predict(X_lstm, verbose=0)
+        pred_power = max(0, scaler_y.inverse_transform(y_scaled)[0][0])
+        
+        # Update features for next step
+        interval_hours = interval_sec / 3600.0
+        new_current = pred_power / (voltage_const * pf_const) if voltage_const * pf_const > 0 else current_last
+        new_energy = energy_last + (pred_power * interval_hours / 1000.0)
+        new_row = np.array([voltage_const, new_current, new_energy, pf_const, frequency_const])
+        
+        # Slide window: Append new row, remove oldest
+        recent_features = np.vstack((recent_features[1:], new_row))
+        
+        # Update lasts
+        current_last = new_current
+        energy_last = new_energy
+        
+        # Store
+        predictions.append((current_time, pred_power))
+        current_time += timedelta(seconds=interval_sec)
+    
+    df_pred = pd.DataFrame(predictions, columns=['time', 'predicted_power'])
+    df_pred.set_index('time', inplace=True)
+    return df_pred
+
 # --- 7. FORECAST MONTHLY USAGE & COST ---
 def forecast_monthly(df_hist, duration_days, interval):
     interval_hours = interval / 3600.0
@@ -146,6 +194,15 @@ selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
 
+st.sidebar.subheader("Forecast Next Week")
+enable_forecast = st.sidebar.checkbox("Enable Next Week Forecast", value=False)
+if enable_forecast:
+    past_start = st.sidebar.date_input("Start of Past Week", value=date(2025, 12, 1))
+    past_end = past_start + timedelta(days=6)
+    forecast_start = past_end + timedelta(days=1)
+    forecast_end = forecast_start + timedelta(days=6)
+    st.sidebar.info(f"Predicting {forecast_start} to {forecast_end} based on {past_start} to {past_end}")
+
 st.sidebar.subheader("Filter Views")
 show_params = st.sidebar.checkbox("Show Parameters", value=True)
 show_predictions = st.sidebar.checkbox("Show Model Predictions", value=False)
@@ -173,6 +230,25 @@ else:
 with st.spinner('Fetching historical data...'):
     df_hist = get_full_history_data(datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.max.time()), interval)
 
+df_past = pd.DataFrame()
+df_actual_forecast = pd.DataFrame()
+if enable_forecast:
+    with st.spinner('Fetching past week data...'):
+        df_past = get_full_history_data(
+            datetime.combine(past_start, datetime.min.time()),
+            datetime.combine(past_end, datetime.max.time()),
+            FORECAST_INTERVAL
+        )
+    with st.spinner('Fetching actual forecast week data...'):
+        df_actual_forecast = get_full_history_data(
+            datetime.combine(forecast_start, datetime.min.time()),
+            datetime.combine(forecast_end, datetime.max.time()),
+            FORECAST_INTERVAL
+        )
+    if df_past.empty or df_actual_forecast.empty:
+        st.warning("Insufficient data for forecasting. Check date range or API.")
+        enable_forecast = False  # Disable to avoid errors
+
 if use_live_data and selected_model == "LSTM":
     recent_df = get_recent_data()
 else:
@@ -185,6 +261,13 @@ elif selected_model == "XGBoost":
     pred_power = predict_with_tree(xgb_model, features_dict, scaler_X, scaler_y)
 else:
     pred_power = predict_with_lstm(recent_df, scaler_X, scaler_y)
+
+# --- Forecast Next Week ---
+df_forecast = pd.DataFrame()
+if enable_forecast and not df_past.empty:
+    num_steps = len(df_actual_forecast)  # Match actual points
+    with st.spinner('Generating forecast...'):
+        df_forecast = forecast_next_week_lstm(df_past, num_steps, FORECAST_INTERVAL, scaler_X, scaler_y)
 
 # --- Display 6 Parameters (if selected) ---
 if show_params:
@@ -239,7 +322,7 @@ if not df_hist.empty and show_graphs:
     st.metric("Avg Predicted Power (Range)", avg_pred)
 
     # Graphs in Tabs
-    tab1, tab2, tab3 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed", "Week Forecast"])
 
     with tab1:
         st.markdown("### Power Consumption (Watts)")
@@ -264,6 +347,15 @@ if not df_hist.empty and show_graphs:
     with tab3:
         st.markdown("### Cumulative Energy (kWh)")
         st.line_chart(df_hist['energy_kwh'])
+
+    with tab4:
+        if not df_forecast.empty:
+            st.markdown("### Actual vs Predicted Power (Next Week)")
+            compare_df = df_actual_forecast[['power']].join(df_forecast, how='outer')
+            compare_df.columns = ['Actual Power', 'Predicted Power']
+            st.line_chart(compare_df)
+        else:
+            st.info("Select dates and enable forecast to view.")
 
 else:
     st.info("No history data available for the selected range.")
