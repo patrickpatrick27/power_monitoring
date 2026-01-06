@@ -22,6 +22,7 @@ FEATURES = ["voltage", "current", "energy_kwh", "pf", "frequency"]
 PARAMS = ["voltage", "current", "power", "energy_kwh", "frequency", "pf"]
 TIMESTEPS = 5  # Match your training config
 PESO_PER_KWH = 13  # Average rate from Philippines (as of December 2025)
+ASSUMED_RECORDING_INTERVAL = 60  # Seconds; adjust to your hardware's actual posting interval (e.g., 10-60s)
 
 # --- LOAD MODELS (Cached for performance) ---
 @st.cache_resource
@@ -61,17 +62,23 @@ def get_history_for_feed(fid, start_time, end_time, interval):
 # --- 3. GET RECENT DATA FOR LSTM (Last TIMESTEPS points for features) ---
 def get_recent_data(timesteps=TIMESTEPS):
     data = {}
+    end_time = datetime.now()
+    # Fix: Calculate a recent start time to cover at least TIMESTEPS points + buffer
+    buffer = 2  # Extra points to ensure we get enough
+    start_time = end_time - timedelta(seconds=ASSUMED_RECORDING_INTERVAL * (timesteps + buffer))
     for feature in FEATURES:
         fid = FEED_IDS[feature]
-        url = f"{EMONCMS_URL}/feed/data.json?id={fid}&start=0&end={int(datetime.now().timestamp()*1000)}&dp={timesteps}&apikey={API_KEY}"
-        try:
-            resp = requests.get(url, timeout=5).json()
-            data[feature] = [d[1] for d in resp][-timesteps:]
-        except:
+        # Use calculated start/end and fixed interval to get raw/recent points (no dp=; dp causes full-history sampling)
+        feat_data = get_history_for_feed(fid, start_time, end_time, ASSUMED_RECORDING_INTERVAL)
+        if feat_data:
+            data[feature] = [d[1] for d in feat_data][-timesteps:]  # Take last timesteps
+        else:
             data[feature] = [0.0] * timesteps
+
     df = pd.DataFrame(data)
     if len(df) < timesteps:
-        pad = pd.DataFrame({f: [df[f].mean()] * (timesteps - len(df)) for f in FEATURES})
+        # Pad with mean if too few
+        pad = pd.DataFrame({f: [df[f].mean() if len(df) > 0 else 0.0] * (timesteps - len(df)) for f in FEATURES})
         df = pd.concat([pad, df], ignore_index=True)
     return df
 
@@ -90,8 +97,9 @@ def get_full_history_data(start_date, end_date, interval):
         if len(feat_data) == len(data):
             historical_data[feature] = [d[1] for d in feat_data]
         else:
-            st.warning(f"Data sync mismatch for {feature}. Graph may be partial.")
-            historical_data[feature] = [0] * len(data)
+            st.warning(f"Data sync mismatch for {feature}. Using mean padding.")
+            mean_val = np.mean([d[1] for d in feat_data]) if feat_data else 0.0
+            historical_data[feature] = [mean_val] * len(data)  # Fix: Use mean instead of 0 for better robustness
 
     df = pd.DataFrame(historical_data, index=times)
     df = df.apply(pd.to_numeric, errors='coerce').dropna()
@@ -147,7 +155,7 @@ def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler
         new_row = np.array([voltage_const, new_current, new_energy, pf_const, frequency_const])
         
         # Slide window: Append new row, remove oldest
-        recent_features = np.vstack((recent_features[1:], new_row))
+        recent_features = np.vstack((recent_features[1:], new_row.reshape(1, -1)))  # Fix: Ensure new_row is 2D
         
         # Update lasts
         current_last = new_current
