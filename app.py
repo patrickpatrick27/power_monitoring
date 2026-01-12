@@ -30,11 +30,9 @@ def load_models():
     scaler_X = joblib.load("models/scaler_X.pkl")
     scaler_y = joblib.load("models/scaler_y.pkl")
     rf = joblib.load("models/random_forest.pkl")
-    xgb = joblib.load("models/xgboost.pkl")
-    lstm = load_model("models/lstm_model.keras")
-    return scaler_X, scaler_y, rf, xgb, lstm
+    return scaler_X, scaler_y, rf
 
-scaler_X, scaler_y, rf_model, xgb_model, lstm_model = load_models()
+scaler_X, scaler_y, rf_model = load_models()
 
 # --- 1. GET LIVE VALUES FOR ALL FEATURES + POWER ---
 def get_live_values():
@@ -113,78 +111,12 @@ def predict_with_tree(model, features_dict, scaler_X, scaler_y):
     y = scaler_y.inverse_transform(y_scaled.reshape(-1, 1))[0][0]
     return max(0, y)
 
-# --- 6. PREDICT WITH LSTM (Next step forecast) ---
-def predict_with_lstm(recent_df, scaler_X, scaler_y):
-    X = recent_df.values
-    X_scaled = scaler_X.transform(X)
-    X_lstm = X_scaled.reshape(1, TIMESTEPS, len(FEATURES))
-    y_scaled = lstm_model.predict(X_lstm, verbose=0)
-    y = scaler_y.inverse_transform(y_scaled)[0][0]
-    return max(0, y)
-
-# --- 6.5 FORECAST NEXT PERIOD WITH LSTM ---
-def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
-    if len(df_past) < TIMESTEPS:
-        return pd.DataFrame()  # Not enough data
-    
-    # Constants from last past data point
-    last_row = df_past.iloc[-1]
-    voltage_const = last_row['voltage']
-    pf_const = last_row['pf']
-    frequency_const = last_row['frequency']
-    current_last = last_row['current']
-    energy_last = last_row['energy_kwh']
-    
-    # Start with last TIMESTEPS features
-    recent_features = df_past[FEATURES].tail(TIMESTEPS).values
-    
-    predictions = []
-    current_time = df_past.index[-1] + timedelta(seconds=interval_sec)
-    
-    for _ in range(num_steps):
-        # Predict next power
-        X_scaled = scaler_X.transform(recent_features)
-        X_lstm = X_scaled.reshape(1, TIMESTEPS, len(FEATURES))
-        y_scaled = lstm_model.predict(X_lstm, verbose=0)
-        pred_power = max(0, scaler_y.inverse_transform(y_scaled)[0][0])
-        
-        # Update features for next step
-        interval_hours = interval_sec / 3600.0
-        new_current = pred_power / (voltage_const * pf_const) if voltage_const * pf_const > 0 else current_last
-        new_energy = energy_last + (pred_power * interval_hours / 1000.0)
-        new_row = np.array([voltage_const, new_current, new_energy, pf_const, frequency_const])
-        
-        # Slide window: Append new row, remove oldest
-        recent_features = np.vstack((recent_features[1:], new_row.reshape(1, -1)))  # Fix: Ensure new_row is 2D
-        
-        # Update lasts
-        current_last = new_current
-        energy_last = new_energy
-        
-        # Store
-        predictions.append((current_time, pred_power))
-        current_time += timedelta(seconds=interval_sec)
-    
-    df_pred = pd.DataFrame(predictions, columns=['time', 'predicted_power'])
-    df_pred.set_index('time', inplace=True)
-    return df_pred
-
-# --- 7. FORECAST MONTHLY USAGE & COST ---
-def forecast_monthly(df_hist, duration_days, interval):
-    interval_hours = interval / 3600.0
-    total_kwh = (df_hist['power'] * interval_hours / 1000.0).sum()
-    avg_daily_kwh = total_kwh / max(1, duration_days)
-    monthly_kwh = avg_daily_kwh * 30  # Approximate month
-    monthly_peso = monthly_kwh * PESO_PER_KWH
-    return monthly_kwh, monthly_peso
-
 # --- DASHBOARD UI (All in one page) ---
 st.set_page_config(page_title="Power Monitoring", page_icon="⚡", layout="wide")
 st.title("⚡ Smart Home Energy Tracker")
 
 # Sidebar for Interactivity & Filters
 st.sidebar.header("Interact & Predict")
-selected_model = st.sidebar.selectbox("Select Model", ["Random Forest", "XGBoost", "LSTM"])
 use_live_data = st.sidebar.checkbox("Use Live Data", value=True)
 
 st.sidebar.subheader("Select Date Range")
@@ -201,40 +133,6 @@ selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
 # Dynamic interval for main history
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
-
-st.sidebar.subheader("Forecast Next Period")
-enable_forecast = st.sidebar.checkbox("Enable Next Period Forecast", value=False)
-if enable_forecast:
-    forecast_period = st.sidebar.selectbox("Forecast Period", ["Daily", "Weekly", "Monthly", "Yearly"])
-    past_start = st.sidebar.date_input("Start of Past Period", value=date(2025, 12, 1))
-    
-    # Calculate past_end and forecast dates based on period
-    if forecast_period == "Daily":
-        past_end = past_start
-        forecast_start = past_end + timedelta(days=1)
-        forecast_end = forecast_start
-        forecast_interval = 3600  # Hourly for day (24 steps)
-        period_label = "Day"
-    elif forecast_period == "Weekly":
-        past_end = past_start + timedelta(days=6)
-        forecast_start = past_end + timedelta(days=1)
-        forecast_end = forecast_start + timedelta(days=6)
-        forecast_interval = 3600 * 4  # 4-hourly for week (~42 steps)
-        period_label = "Week"
-    elif forecast_period == "Monthly":
-        past_end = past_start + relativedelta(months=1, days=-1)
-        forecast_start = past_end + timedelta(days=1)
-        forecast_end = forecast_start + relativedelta(months=1, days=-1)
-        forecast_interval = 86400  # Daily for month (~30 steps)
-        period_label = "Month"
-    else:  # Yearly
-        past_end = past_start + relativedelta(years=1, days=-1)
-        forecast_start = past_end + timedelta(days=1)
-        forecast_end = forecast_start + relativedelta(years=1, days=-1)
-        forecast_interval = 86400 * 30  # Monthly for year (~12 steps)
-        period_label = "Year"
-    
-    st.sidebar.info(f"Predicting next {forecast_period.lower()} ({forecast_start} to {forecast_end}) based on {past_start} to {past_end}")
 
 st.sidebar.subheader("Filter Views")
 show_params = st.sidebar.checkbox("Show Parameters", value=True)
@@ -269,8 +167,8 @@ if 'test_results' not in st.session_state:
     st.session_state.test_results = {}
 
 # Helper function to record a test result
-def record_test(test_id, name, actual, trials, status):
-    key = f"{test_phase}_{test_id}"
+def record_test(phase, test_id, name, actual, trials, status):
+    key = f"{phase}_{test_id}"
     st.session_state.test_results[key] = {
         "Test ID": test_id,
         "Test Name": name,
@@ -288,7 +186,7 @@ if test_phase == "Unit Testing":
         ("UT-01", "ESP32 microcontroller Latency", "1 to 10 ms"),
         ("UT-02", "PZEM-004T voltage accuracy", "±1% or better"),
         ("UT-03", "SCT-013-050 current accuracy", "±1-2%"),
-        ("UT-04", "CNN-LSTM forecast", "MAE < 50W or MAPE < 8%"),
+        ("UT-04", "Random Forest forecast", "MAE < 50W or MAPE < 8%"),
         ("UT-05", "Dashboard testing", "All widgets load < 5s")
     ]
     
@@ -302,28 +200,26 @@ if test_phase == "Unit Testing":
         status = st.sidebar.selectbox(f"Status {tid}", ["Pass", "Fail", "Pending"], key=f"status_{tid}")
         
         if st.sidebar.button(f"Save {tid}", key=f"save_{tid}"):
-            record_test(tid, name, actual, trials, status)
+            record_test(test_phase, tid, name, actual, trials, status)
             st.sidebar.success(f"{tid} recorded!")
 
-    # Quick CNN-LSTM forecast error test (for UT-04)
+    # Quick Random Forest forecast error test (for UT-04)
     if st.sidebar.button("Quick Forecast Accuracy Check"):
-        if not df_hist.empty and len(df_hist) >= TIMESTEPS + 10:
-            test_df = df_hist.iloc[- (TIMESTEPS + 10):]
-            X_test = test_df[FEATURES].values
+        if not df_hist.empty and len(df_hist) > 10:
+            X_test = df_hist[FEATURES].values
+            y_true = df_hist['power'].values
             X_scaled = scaler_X.transform(X_test)
-            Xs = np.array([X_scaled[i:i+TIMESTEPS] for i in range(len(X_scaled)-TIMESTEPS)])
-            y_true = test_df['power'].values[TIMESTEPS:]
-            y_pred_scaled = lstm_model.predict(Xs, verbose=0)
-            y_pred = scaler_y.inverse_transform(y_pred_scaled).flatten()
+            y_scaled = rf_model.predict(X_scaled)
+            y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
             
             mae = np.mean(np.abs(y_true - y_pred))
-            mape = np.mean(np.abs((y_true - y_pred) / y_true.clip(1))) * 100
+            mape = np.mean(np.abs((y_true - y_pred) / np.clip(y_true, 1, None))) * 100
             
             st.sidebar.metric("MAE (last points)", f"{mae:.1f} W")
             st.sidebar.metric("MAPE", f"{mape:.1f}%")
             
             status = "Pass" if mae < 50 and mape < 8 else "Fail"
-            record_test("UT-04", "CNN-LSTM forecast", f"MAE={mae:.1f}, MAPE={mape:.1f}%", 1, status)
+            record_test(test_phase, "UT-04", "Random Forest forecast", f"MAE={mae:.1f}, MAPE={mape:.1f}%", 1, status)
 
 elif test_phase == "Integration Testing":
     st.sidebar.subheader("Integration Testing")
@@ -346,7 +242,7 @@ elif test_phase == "Integration Testing":
         status = st.sidebar.selectbox(f"Status {tid}", ["Pass", "Fail", "Pending"], key=f"status_{tid}")
         
         if st.sidebar.button(f"Save {tid}", key=f"save_{tid}"):
-            record_test(tid, name, actual, trials, status)
+            record_test(test_phase, tid, name, actual, trials, status)
             st.sidebar.success(f"{tid} recorded!")
 
 elif test_phase == "System Testing":
@@ -354,7 +250,7 @@ elif test_phase == "System Testing":
     
     st_tests = [
         ("ST-01", "Real-time Monitoring", "Observe end-to-end functionality in real time", "All components sync and respond in <1s delay"),
-        ("ST-02", "Forecast Accuracy Over Time", "CNN-LSTM prediction for extended durations", "Model maintains acceptable error margin"),
+        ("ST-02", "Forecast Accuracy Over Time", "Random Forest prediction for extended durations", "Model maintains acceptable error margin"),
         ("ST-03", "Multi-device Access", "Access dashboard from multiple mobile devices", "Consistent and correct data displayed"),
         ("ST-04", "Data Loss Scenario", "Test with brief network interruption", "System retries and restores data transmission")
     ]
@@ -369,7 +265,7 @@ elif test_phase == "System Testing":
         status = st.sidebar.selectbox(f"Status {tid}", ["Pass", "Fail", "Pending"], key=f"status_{tid}")
         
         if st.sidebar.button(f"Save {tid}", key=f"save_{tid}"):
-            record_test(tid, name, actual, trials, status)
+            record_test(test_phase, tid, name, actual, trials, status)
             st.sidebar.success(f"{tid} recorded!")
     
     # Interactive test for ST-01
@@ -378,8 +274,26 @@ elif test_phase == "System Testing":
         _ = get_live_values()  # force fetch
         delay = (datetime.now() - start).total_seconds()
         status = "Pass" if delay < 1.0 else "Fail"
-        record_test("ST-01", "Real-time Monitoring", f"{delay:.3f}s", 1, status)
+        record_test(test_phase, "ST-01", "Real-time Monitoring", f"{delay:.3f}s", 1, status)
         st.sidebar.metric("Last Delay", f"{delay:.3f}s", delta=status)
+
+    # Quick forecast accuracy for ST-02 (using RF)
+    if st.sidebar.button("Quick Forecast Accuracy Check (ST-02)"):
+        if not df_hist.empty and len(df_hist) > 10:
+            X_test = df_hist[FEATURES].values
+            y_true = df_hist['power'].values
+            X_scaled = scaler_X.transform(X_test)
+            y_scaled = rf_model.predict(X_scaled)
+            y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
+            
+            mae = np.mean(np.abs(y_true - y_pred))
+            mape = np.mean(np.abs((y_true - y_pred) / np.clip(y_true, 1, None))) * 100
+            
+            st.sidebar.metric("MAE", f"{mae:.1f} W")
+            st.sidebar.metric("MAPE", f"{mape:.1f}%")
+            
+            status = "Pass" if mae < 50 and mape < 8 else "Fail"
+            record_test(test_phase, "ST-02", "Forecast Accuracy Over Time", f"MAE={mae:.1f}, MAPE={mape:.1f}%", 1, status)
 
 elif test_phase == "Acceptance Testing":
     st.sidebar.subheader("Acceptance Testing")
@@ -396,7 +310,7 @@ elif test_phase == "Acceptance Testing":
         max_val = 10 if "10" in scale else 5
         rating = st.sidebar.slider(name, 1, max_val, max_val // 2, key=f"rating_{tid}")
         if st.sidebar.button(f"Record {tid}"):
-            record_test(tid, name, str(rating), 1, "Pass" if rating >= (max_val // 2 + 1) else "Fail")
+            record_test(test_phase, tid, name, str(rating), 1, "Pass" if rating >= (max_val // 2 + 1) else "Fail")
             st.sidebar.success(f"{tid} recorded!")
 
 elif test_phase == "Performance Testing":
@@ -420,17 +334,18 @@ elif test_phase == "Performance Testing":
         status = st.sidebar.selectbox(f"Status {tid}", ["Pass", "Fail", "Pending"], key=f"status_{tid}")
         
         if st.sidebar.button(f"Save {tid}", key=f"save_{tid}"):
-            record_test(tid, name, actual, trials, status)
+            record_test(test_phase, tid, name, actual, trials, status)
             st.sidebar.success(f"{tid} recorded!")
 
-    # Interactive test for PT-05
+    # Interactive test for PT-05 (using RF)
     if st.sidebar.button("Test Real-time Forecast Response"):
         start = datetime.now()
-        recent_df = get_recent_data()
-        _ = predict_with_lstm(recent_df, scaler_X, scaler_y)
+        features_dict = get_live_values()
+        features_dict = {k: v for k, v in features_dict.items() if k in FEATURES}
+        _ = predict_with_tree(rf_model, features_dict, scaler_X, scaler_y)
         delay = (datetime.now() - start).total_seconds()
         status = "Pass" if delay < 1.0 else "Fail"
-        record_test("PT-05", "Real-time Forecast Response", f"{delay:.3f}s", 1, status)
+        record_test(test_phase, "PT-05", "Real-time Forecast Response", f"{delay:.3f}s", 1, status)
         st.sidebar.metric("Last Forecast Delay", f"{delay:.3f}s", delta=status)
 
 elif test_phase == "Usability Testing":
@@ -445,7 +360,7 @@ elif test_phase == "Usability Testing":
     for tid, name, scale in ust_tests:
         rating = st.sidebar.slider(name, 1, 5, 3, key=f"rating_{tid}")
         if st.sidebar.button(f"Record {tid}"):
-            record_test(tid, name, str(rating), 1, "Pass" if rating >= 3 else "Fail")
+            record_test(test_phase, tid, name, str(rating), 1, "Pass" if rating >= 3 else "Fail")
             st.sidebar.success(f"{tid} recorded!")
 
 elif test_phase == "Reliability Testing":
@@ -467,7 +382,7 @@ elif test_phase == "Reliability Testing":
         status = st.sidebar.selectbox(f"Status {tid}", ["Pass", "Fail", "Pending"], key=f"status_{tid}")
         
         if st.sidebar.button(f"Save {tid}", key=f"save_{tid}"):
-            record_test(tid, name, actual, trials, status)
+            record_test(test_phase, tid, name, actual, trials, status)
             st.sidebar.success(f"{tid} recorded!")
 
 elif test_phase == "Security Testing":
@@ -490,7 +405,7 @@ elif test_phase == "Security Testing":
         status = st.sidebar.selectbox(f"Status {tid}", ["Pass", "Fail", "Pending"], key=f"status_{tid}")
         
         if st.sidebar.button(f"Save {tid}", key=f"save_{tid}"):
-            record_test(tid, name, actual, trials, status)
+            record_test(test_phase, tid, name, actual, trials, status)
             st.sidebar.success(f"{tid} recorded!")
 
 # Fetch Data
@@ -514,44 +429,8 @@ else:
 with st.spinner('Fetching historical data...'):
     df_hist = get_full_history_data(datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.max.time()), interval)
 
-df_past = pd.DataFrame()
-df_actual_forecast = pd.DataFrame()
-if enable_forecast:
-    with st.spinner('Fetching past period data...'):
-        df_past = get_full_history_data(
-            datetime.combine(past_start, datetime.min.time()),
-            datetime.combine(past_end, datetime.max.time()),
-            forecast_interval
-        )
-    with st.spinner('Fetching actual forecast period data...'):
-        df_actual_forecast = get_full_history_data(
-            datetime.combine(forecast_start, datetime.min.time()),
-            datetime.combine(forecast_end, datetime.max.time()),
-            forecast_interval
-        )
-    if df_past.empty or df_actual_forecast.empty:
-        st.warning("Insufficient data for forecasting. Check date range or API.")
-        enable_forecast = False  # Disable to avoid errors
-
-if use_live_data and selected_model == "LSTM":
-    recent_df = get_recent_data()
-else:
-    recent_df = pd.DataFrame([features_dict] * TIMESTEPS) if not use_live_data else None
-
 # --- Predictions (Single Point) ---
-if selected_model == "Random Forest":
-    pred_power = predict_with_tree(rf_model, features_dict, scaler_X, scaler_y)
-elif selected_model == "XGBoost":
-    pred_power = predict_with_tree(xgb_model, features_dict, scaler_X, scaler_y)
-else:
-    pred_power = predict_with_lstm(recent_df, scaler_X, scaler_y)
-
-# --- Forecast Next Period ---
-df_forecast = pd.DataFrame()
-if enable_forecast and not df_past.empty:
-    num_steps = len(df_actual_forecast)  # Match actual points
-    with st.spinner('Generating forecast...'):
-        df_forecast = forecast_next_period_lstm(df_past, num_steps, forecast_interval, scaler_X, scaler_y)
+pred_power = predict_with_tree(rf_model, features_dict, scaler_X, scaler_y)
 
 # --- Display 6 Parameters (if selected) ---
 if show_params:
@@ -577,25 +456,13 @@ if not df_hist.empty and show_graphs:
     # Calculate Predictions if Requested
     predicted_col_exists = False
     if show_predictions:
-        if selected_model in ["Random Forest", "XGBoost"]:
-            model = rf_model if selected_model == "Random Forest" else xgb_model
-            X = df_hist[FEATURES].values
-            if len(X) > 0:
-                X_scaled = scaler_X.transform(X)
-                y_scaled = model.predict(X_scaled)
-                y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
-                df_hist['predicted'] = [max(0, p) for p in y_pred]
-                predicted_col_exists = True
-        else:  # LSTM
-            X = df_hist[FEATURES].values
-            if len(X) >= TIMESTEPS:
-                X_scaled = scaler_X.transform(X)
-                Xs = np.array([X_scaled[i:i + TIMESTEPS] for i in range(len(X_scaled) - TIMESTEPS)])
-                y_scaled = lstm_model.predict(Xs, verbose=0)
-                y_pred = scaler_y.inverse_transform(y_scaled).flatten()
-                df_hist['predicted'] = np.nan
-                df_hist.iloc[TIMESTEPS:, df_hist.columns.get_loc('predicted')] = [max(0, p) for p in y_pred]
-                predicted_col_exists = True
+        X = df_hist[FEATURES].values
+        if len(X) > 0:
+            X_scaled = scaler_X.transform(X)
+            y_scaled = rf_model.predict(X_scaled)
+            y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
+            df_hist['predicted'] = [max(0, p) for p in y_pred]
+            predicted_col_exists = True
 
     # Avg Predicted
     avg_pred = "N/A"
@@ -606,7 +473,7 @@ if not df_hist.empty and show_graphs:
     st.metric("Avg Predicted Power (Range)", avg_pred)
 
     # Graphs in Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed", "Period Forecast"])
+    tab1, tab2, tab3 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed"])
 
     with tab1:
         st.markdown("### Power Consumption (Watts)")
@@ -632,15 +499,6 @@ if not df_hist.empty and show_graphs:
         st.markdown("### Cumulative Energy (kWh)")
         st.line_chart(df_hist['energy_kwh'])
 
-    with tab4:
-        if not df_forecast.empty:
-            st.markdown(f"### Actual vs Predicted Power (Next {period_label})")
-            compare_df = df_actual_forecast[['power']].join(df_forecast, how='outer')
-            compare_df.columns = ['Actual Power', 'Predicted Power']
-            st.line_chart(compare_df)
-        else:
-            st.info("Select dates and enable forecast to view.")
-
 else:
     st.info("No history data available for the selected range.")
 
@@ -653,6 +511,41 @@ if show_forecast and not df_hist.empty:
     col_f2.metric("Projected Monthly Cost (PHP)", f"{monthly_peso:.2f}")
     st.info(f"Assumption: Usage over selected {duration_days} days repeats for 30-day month at {PESO_PER_KWH} PHP/kWh (current avg rate).")
 
+# ── Automated Tests Button ────────────────────────────────────────────────
+st.subheader("Automated Testing")
+if st.button("Run Automated Tests"):
+    with st.spinner("Running automated tests..."):
+        # ST-01: Real-time sync
+        start = datetime.now()
+        _ = get_live_values()
+        delay = (datetime.now() - start).total_seconds()
+        status = "Pass" if delay < 1.0 else "Fail"
+        record_test("System Testing", "ST-01", "Real-time Monitoring", f"{delay:.3f}s", 1, status)
+
+        # UT-04 / ST-02: Forecast accuracy (RF)
+        if not df_hist.empty and len(df_hist) > 10:
+            X_test = df_hist[FEATURES].values
+            y_true = df_hist['power'].values
+            X_scaled = scaler_X.transform(X_test)
+            y_scaled = rf_model.predict(X_scaled)
+            y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
+            
+            mae = np.mean(np.abs(y_true - y_pred))
+            mape = np.mean(np.abs((y_true - y_pred) / np.clip(y_true, 1, None))) * 100
+            
+            status = "Pass" if mae < 50 and mape < 8 else "Fail"
+            record_test("Unit Testing", "UT-04", "Random Forest forecast", f"MAE={mae:.1f}, MAPE={mape:.1f}%", 1, status)
+            record_test("System Testing", "ST-02", "Forecast Accuracy Over Time", f"MAE={mae:.1f}, MAPE={mape:.1f}%", 1, status)
+
+        # PT-05: Forecast response time (RF)
+        start = datetime.now()
+        _ = predict_with_tree(rf_model, features_dict, scaler_X, scaler_y)
+        delay = (datetime.now() - start).total_seconds()
+        status = "Pass" if delay < 1.0 else "Fail"
+        record_test("Performance Testing", "PT-05", "Real-time Forecast Response", f"{delay:.3f}s", 1, status)
+    
+    st.success("Automated tests completed! Check results in the selected phase.")
+
 # ── Show Summary Table ────────────────────────────────────────────────
 
 st.subheader(f"📋 {test_phase} Results")
@@ -661,7 +554,6 @@ if st.session_state.test_results:
     results_df = pd.DataFrame.from_dict(st.session_state.test_results, orient="index")
     
     # Filter only current phase
-    phase_prefix = test_phase.split(" ")[0][:3].upper().replace(" ", "")[:3] + "-"  # Adjust for phase names, e.g., "Uni-" -> "UT-", but better map
     if test_phase == "Unit Testing":
         phase_prefix = "UT-"
     elif test_phase == "Integration Testing":
@@ -699,12 +591,21 @@ if st.session_state.test_results:
             phase_df.style.applymap(color_status, subset=['Status']),
             use_container_width=True
         )
+
+        # Download button
+        csv = phase_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="Download Phase Results as CSV",
+            data=csv,
+            file_name=f"{test_phase}_results.csv",
+            mime='text/csv'
+        )
     else:
         st.info(f"No results recorded yet for {test_phase}")
 else:
-    st.info("No test results recorded yet. Use the sidebar to start testing.")
+    st.info("No test results recorded yet. Use the sidebar to start testing or run automated tests.")
 
 st.caption("Note: This is a simplified in-memory test logger. Results reset on app restart. "
            "For production/paper use → export to CSV or Google Sheets.")
 
-st.info("Tip: Use checkboxes in sidebar to filter views. For forecasting, select a period to extrapolate.")
+st.info("Tip: Use checkboxes in sidebar to filter views.")
