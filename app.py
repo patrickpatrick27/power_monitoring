@@ -127,7 +127,7 @@ def forecast_monthly(df_hist, duration_days, interval):
 
 # --- UI START ---
 st.set_page_config(page_title="Power Monitoring", page_icon="⚡", layout="wide")
-st.title("⚡ Home Energy Monitoring Website")
+st.title("⚡ Home Energy Monitoring Dashboard")
 
 # --- SIDEBAR ---
 st.sidebar.header("Configuration")
@@ -173,7 +173,8 @@ with st.sidebar.expander("⚡ Forecasting Setup", expanded=False):
 # 3. View Filters
 with st.sidebar.expander("⚙️ View Options", expanded=False):
     show_params = st.checkbox("Show Parameters", value=True)
-    show_predictions = st.checkbox("Show RF Predictions on Graph", value=False)
+    # --- CHANGED DEFAULT TO TRUE HERE ---
+    show_predictions = st.checkbox("Show RF Predictions on Graph", value=True)
     show_graphs = st.checkbox("Show Historical Graphs", value=True)
     show_forecast = st.checkbox("Show Monthly Cost Est.", value=True)
 
