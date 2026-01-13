@@ -21,12 +21,13 @@ FEED_IDS = {
 FEATURES = ["voltage", "current", "energy_kwh", "pf", "frequency"]
 PARAMS = ["voltage", "current", "power", "energy_kwh", "frequency", "pf"]
 TIMESTEPS = 5  # Match your training config
-PESO_PER_KWH = 13  # Average rate from Philippines (as of December 2025)
-ASSUMED_RECORDING_INTERVAL = 60  # Seconds; adjust to your hardware's actual posting interval (e.g., 10-60s)
+PESO_PER_KWH = 13  # Average rate (PHP)
+ASSUMED_RECORDING_INTERVAL = 60  # Seconds
 
 # --- LOAD MODELS (Cached for performance) ---
 @st.cache_resource
 def load_models():
+    # Ensure these files exist in your 'models/' directory
     scaler_X = joblib.load("models/scaler_X.pkl")
     scaler_y = joblib.load("models/scaler_y.pkl")
     rf = joblib.load("models/random_forest.pkl")
@@ -63,43 +64,37 @@ def get_history_for_feed(fid, start_time, end_time, interval):
 def get_recent_data(timesteps=TIMESTEPS):
     data = {}
     end_time = datetime.now()
-    # Fix: Calculate a recent start time to cover at least TIMESTEPS points + buffer
-    buffer = 2  # Extra points to ensure we get enough
+    buffer = 2
     start_time = end_time - timedelta(seconds=ASSUMED_RECORDING_INTERVAL * (timesteps + buffer))
     for feature in FEATURES:
         fid = FEED_IDS[feature]
-        # Use calculated start/end and fixed interval to get raw/recent points (no dp=; dp causes full-history sampling)
         feat_data = get_history_for_feed(fid, start_time, end_time, ASSUMED_RECORDING_INTERVAL)
         if feat_data:
-            data[feature] = [d[1] for d in feat_data][-timesteps:]  # Take last timesteps
+            data[feature] = [d[1] for d in feat_data][-timesteps:]
         else:
             data[feature] = [0.0] * timesteps
 
     df = pd.DataFrame(data)
     if len(df) < timesteps:
-        # Pad with mean if too few
         pad = pd.DataFrame({f: [df[f].mean() if len(df) > 0 else 0.0] * (timesteps - len(df)) for f in FEATURES})
         df = pd.concat([pad, df], ignore_index=True)
     return df
 
 # --- 4. GET FULL HISTORICAL DATA FOR ALL FEATURES ---
 def get_full_history_data(start_date, end_date, interval):
-    # Fetch Power first as the index reference
     data = get_history_for_feed(FEED_IDS['power'], start_date, end_date, interval)
     if not data: return pd.DataFrame()
     
     times = [pd.to_datetime(d[0], unit='ms') for d in data]
     historical_data = {'power': [d[1] for d in data]}
     
-    # Fetch other features
     for feature in FEATURES:
         feat_data = get_history_for_feed(FEED_IDS[feature], start_date, end_date, interval)
         if len(feat_data) == len(data):
             historical_data[feature] = [d[1] for d in feat_data]
         else:
-            st.warning(f"Data sync mismatch for {feature}. Using mean padding.")
             mean_val = np.mean([d[1] for d in feat_data]) if feat_data else 0.0
-            historical_data[feature] = [mean_val] * len(data)  # Fix: Use mean instead of 0 for better robustness
+            historical_data[feature] = [mean_val] * len(data)
 
     df = pd.DataFrame(historical_data, index=times)
     df = df.apply(pd.to_numeric, errors='coerce').dropna()
@@ -125,9 +120,8 @@ def predict_with_lstm(recent_df, scaler_X, scaler_y):
 # --- 6.5 FORECAST NEXT PERIOD WITH LSTM ---
 def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
     if len(df_past) < TIMESTEPS:
-        return pd.DataFrame()  # Not enough data
+        return pd.DataFrame()
     
-    # Constants from last past data point
     last_row = df_past.iloc[-1]
     voltage_const = last_row['voltage']
     pf_const = last_row['pf']
@@ -135,33 +129,25 @@ def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler
     current_last = last_row['current']
     energy_last = last_row['energy_kwh']
     
-    # Start with last TIMESTEPS features
     recent_features = df_past[FEATURES].tail(TIMESTEPS).values
-    
     predictions = []
     current_time = df_past.index[-1] + timedelta(seconds=interval_sec)
     
     for _ in range(num_steps):
-        # Predict next power
         X_scaled = scaler_X.transform(recent_features)
         X_lstm = X_scaled.reshape(1, TIMESTEPS, len(FEATURES))
         y_scaled = lstm_model.predict(X_lstm, verbose=0)
         pred_power = max(0, scaler_y.inverse_transform(y_scaled)[0][0])
         
-        # Update features for next step
         interval_hours = interval_sec / 3600.0
         new_current = pred_power / (voltage_const * pf_const) if voltage_const * pf_const > 0 else current_last
         new_energy = energy_last + (pred_power * interval_hours / 1000.0)
         new_row = np.array([voltage_const, new_current, new_energy, pf_const, frequency_const])
         
-        # Slide window: Append new row, remove oldest
-        recent_features = np.vstack((recent_features[1:], new_row.reshape(1, -1)))  # Fix: Ensure new_row is 2D
-        
-        # Update lasts
+        recent_features = np.vstack((recent_features[1:], new_row.reshape(1, -1)))
         current_last = new_current
         energy_last = new_energy
         
-        # Store
         predictions.append((current_time, pred_power))
         current_time += timedelta(seconds=interval_sec)
     
@@ -174,15 +160,15 @@ def forecast_monthly(df_hist, duration_days, interval):
     interval_hours = interval / 3600.0
     total_kwh = (df_hist['power'] * interval_hours / 1000.0).sum()
     avg_daily_kwh = total_kwh / max(1, duration_days)
-    monthly_kwh = avg_daily_kwh * 30  # Approximate month
+    monthly_kwh = avg_daily_kwh * 30
     monthly_peso = monthly_kwh * PESO_PER_KWH
     return monthly_kwh, monthly_peso
 
-# --- DASHBOARD UI (All in one page) ---
+# --- DASHBOARD UI ---
 st.set_page_config(page_title="Power Monitoring", page_icon="⚡", layout="wide")
 st.title("⚡ Smart Home Energy Tracker")
 
-# Sidebar for Interactivity & Filters
+# Sidebar
 st.sidebar.header("Interact & Predict")
 selected_model = st.sidebar.selectbox("Select Model", ["Random Forest", "XGBoost", "LSTM"])
 use_live_data = st.sidebar.checkbox("Use Live Data", value=True)
@@ -198,7 +184,7 @@ if start_date > end_date:
 duration_days = (end_date - start_date).days + 1
 selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
 
-# Dynamic interval for main history
+# Dynamic interval
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
 
@@ -208,30 +194,29 @@ if enable_forecast:
     forecast_period = st.sidebar.selectbox("Forecast Period", ["Daily", "Weekly", "Monthly", "Yearly"])
     past_start = st.sidebar.date_input("Start of Past Period", value=date(2025, 12, 1))
     
-    # Calculate past_end and forecast dates based on period
     if forecast_period == "Daily":
         past_end = past_start
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start
-        forecast_interval = 3600  # Hourly for day (24 steps)
+        forecast_interval = 3600
         period_label = "Day"
     elif forecast_period == "Weekly":
         past_end = past_start + timedelta(days=6)
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start + timedelta(days=6)
-        forecast_interval = 3600 * 4  # 4-hourly for week (~42 steps)
+        forecast_interval = 3600 * 4
         period_label = "Week"
     elif forecast_period == "Monthly":
         past_end = past_start + relativedelta(months=1, days=-1)
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start + relativedelta(months=1, days=-1)
-        forecast_interval = 86400  # Daily for month (~30 steps)
+        forecast_interval = 86400
         period_label = "Month"
-    else:  # Yearly
+    else:
         past_end = past_start + relativedelta(years=1, days=-1)
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start + relativedelta(years=1, days=-1)
-        forecast_interval = 86400 * 30  # Monthly for year (~12 steps)
+        forecast_interval = 86400 * 30
         period_label = "Year"
     
     st.sidebar.info(f"Predicting next {forecast_period.lower()} ({forecast_start} to {forecast_end}) based on {past_start} to {past_end}")
@@ -254,7 +239,7 @@ else:
     energy_kwh = st.sidebar.slider("Energy (kWh)", 0.0, 100.0, 15.0)
     pf = st.sidebar.slider("Power Factor", 0.0, 1.0, 0.8)
     frequency = st.sidebar.slider("Frequency", 50.0, 60.0, 60.0)
-    live_power = 0.0  # Hypothetical, no live power
+    live_power = 0.0
     features_dict = {
         "voltage": voltage, "current": current, "energy_kwh": energy_kwh,
         "pf": pf, "frequency": frequency
@@ -280,14 +265,14 @@ if enable_forecast:
         )
     if df_past.empty or df_actual_forecast.empty:
         st.warning("Insufficient data for forecasting. Check date range or API.")
-        enable_forecast = False  # Disable to avoid errors
+        enable_forecast = False
 
 if use_live_data and selected_model == "LSTM":
     recent_df = get_recent_data()
 else:
     recent_df = pd.DataFrame([features_dict] * TIMESTEPS) if not use_live_data else None
 
-# --- Predictions (Single Point) ---
+# --- Predictions ---
 if selected_model == "Random Forest":
     pred_power = predict_with_tree(rf_model, features_dict, scaler_X, scaler_y)
 elif selected_model == "XGBoost":
@@ -298,11 +283,11 @@ else:
 # --- Forecast Next Period ---
 df_forecast = pd.DataFrame()
 if enable_forecast and not df_past.empty:
-    num_steps = len(df_actual_forecast)  # Match actual points
+    num_steps = len(df_actual_forecast)
     with st.spinner('Generating forecast...'):
         df_forecast = forecast_next_period_lstm(df_past, num_steps, forecast_interval, scaler_X, scaler_y)
 
-# --- Display 6 Parameters (if selected) ---
+# --- Display Parameters ---
 if show_params:
     st.subheader("Current Parameters")
     cols = st.columns(3)
@@ -319,11 +304,10 @@ elif pred_power > 200:
 else:
     st.success("✅ **Efficient:** Predicted consumption is low.")
 
-# --- Historical Trends & Graphs (if selected) ---
+# --- Graphs & Analysis ---
 if not df_hist.empty and show_graphs:
     st.subheader(f"📊 Historical Trends ({selected_range_label})")
     
-    # Calculate Predictions if Requested
     predicted_col_exists = False
     if show_predictions:
         if selected_model in ["Random Forest", "XGBoost"]:
@@ -335,7 +319,7 @@ if not df_hist.empty and show_graphs:
                 y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
                 df_hist['predicted'] = [max(0, p) for p in y_pred]
                 predicted_col_exists = True
-        else:  # LSTM
+        else:
             X = df_hist[FEATURES].values
             if len(X) >= TIMESTEPS:
                 X_scaled = scaler_X.transform(X)
@@ -346,16 +330,13 @@ if not df_hist.empty and show_graphs:
                 df_hist.iloc[TIMESTEPS:, df_hist.columns.get_loc('predicted')] = [max(0, p) for p in y_pred]
                 predicted_col_exists = True
 
-    # Avg Predicted
     avg_pred = "N/A"
     if predicted_col_exists:
         avg_pred_val = df_hist['predicted'].mean(skipna=True)
         avg_pred = f"{avg_pred_val:.1f} W"
-
     st.metric("Avg Predicted Power (Range)", avg_pred)
 
-    # Graphs in Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed", "Period Forecast"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Power & Predictions", "Electrical Params", "Energy Consumed", "Period Forecast & Error"])
 
     with tab1:
         st.markdown("### Power Consumption (Watts)")
@@ -383,23 +364,62 @@ if not df_hist.empty and show_graphs:
 
     with tab4:
         if not df_forecast.empty:
-            st.markdown(f"### Actual vs Predicted Power (Next {period_label})")
-            compare_df = df_actual_forecast[['power']].join(df_forecast, how='outer')
+            st.markdown(f"### 📉 Forecast Accuracy Analysis (Next {period_label})")
+            
+            # Align Data
+            compare_df = df_actual_forecast[['power']].join(df_forecast, how='inner').dropna()
             compare_df.columns = ['Actual Power', 'Predicted Power']
-            st.line_chart(compare_df)
+            
+            if not compare_df.empty:
+                y_true = compare_df['Actual Power']
+                y_pred = compare_df['Predicted Power']
+                
+                # Calculate Error Metrics
+                mae = np.mean(np.abs(y_true - y_pred))
+                rmse = np.sqrt(np.mean((y_true - y_pred)**2))
+                
+                # MAPE (Handle division by zero)
+                non_zero_mask = y_true != 0
+                if np.sum(non_zero_mask) > 0:
+                    mape = np.mean(np.abs((y_true[non_zero_mask] - y_pred[non_zero_mask]) / y_true[non_zero_mask])) * 100
+                else:
+                    mape = 0.0
+
+                # Display Metrics
+                st.markdown("#### Performance Metrics")
+                m_col1, m_col2, m_col3 = st.columns(3)
+                m_col1.metric("Mean Abs. Error (MAE)", f"{mae:.2f} W", help="Avg error in Watts")
+                m_col2.metric("RMSE", f"{rmse:.2f} W", help="Penalizes large spikes")
+                m_col3.metric("Mean Abs. % Error (MAPE)", f"{mape:.2f} %", help="Avg % difference")
+
+                # Automated Analysis
+                st.markdown("#### 📝 Automated Analysis")
+                if mape < 10:
+                    st.success(f"**Excellent Accuracy:** MAPE of **{mape:.2f}%**. Highly reliable.")
+                elif mape < 20:
+                    st.info(f"**Good Accuracy:** Off by **{mape:.2f}%**. Captures general trend.")
+                else:
+                    st.warning(f"**High Deviation:** Error rate of **{mape:.2f}%**. Check for irregular usage.")
+
+                st.line_chart(compare_df)
+                
+                with st.expander("View Detailed Data Table"):
+                    compare_df['Error (W)'] = compare_df['Actual Power'] - compare_df['Predicted Power']
+                    compare_df['% Error'] = (compare_df['Error (W)'] / compare_df['Actual Power']) * 100
+                    st.dataframe(compare_df.style.format("{:.2f}"))
+            else:
+                st.warning("Timestamps do not align. Cannot calculate error.")
         else:
             st.info("Select dates and enable forecast to view.")
 
 else:
     st.info("No history data available for the selected range.")
 
-# --- Monthly Forecast & Cost (if selected) ---
+# --- Monthly Forecast ---
 if show_forecast and not df_hist.empty:
     st.subheader("📅 Monthly Forecast")
     monthly_kwh, monthly_peso = forecast_monthly(df_hist, duration_days, interval)
     col_f1, col_f2 = st.columns(2)
     col_f1.metric("Projected Monthly kWh", f"{monthly_kwh:.2f}")
     col_f2.metric("Projected Monthly Cost (PHP)", f"{monthly_peso:.2f}")
-    st.info(f"Assumption: Usage over selected {duration_days} days repeats for 30-day month at {PESO_PER_KWH} PHP/kWh (current avg rate).")
-
-st.info("Tip: Use checkboxes in sidebar to filter views. For forecasting, select a period to extrapolate.")
+    st.info(f"Assumption: Usage repeats for 30 days at {PESO_PER_KWH} PHP/kWh.")
