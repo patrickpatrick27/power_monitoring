@@ -194,7 +194,12 @@ else:
 
 # --- DATA LOADING ---
 duration_days = (end_date - start_date).days + 1
-selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
+
+# Format dates as Words (e.g., Jan 12, 2026)
+start_str = start_date.strftime("%b %d, %Y")
+end_str = end_date.strftime("%b %d, %Y")
+selected_range_label = f"{start_str} to {end_str}"
+
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
 
@@ -225,26 +230,35 @@ if not df_hist.empty and show_graphs:
     st.markdown("---")
     st.subheader(f"📊 Historical Trends ({selected_range_label})")
     
+    # Use standard datetime index for plotting to let Streamlit handle formatting
+    df_chart = df_hist.copy()
+    
     if show_predictions:
         X = df_hist[FEATURES].values
         if len(X) > 0:
             X_scaled = scaler_X.transform(X)
             y_scaled = rf_model.predict(X_scaled)
             y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
-            df_hist['predicted'] = [max(0, p) for p in y_pred]
+            df_chart['predicted'] = [max(0, p) for p in y_pred]
 
     tab1, tab2, tab3 = st.tabs(["⚡ Power & Cost", "🔌 Electrical Params", "🔋 Energy Consumed"])
 
     with tab1:
         st.markdown("### Power Consumption")
-        if show_predictions and 'predicted' in df_hist.columns:
-            st.line_chart(df_hist[['power', 'predicted']])
+        if show_predictions and 'predicted' in df_chart.columns:
+            st.line_chart(df_chart[['power', 'predicted']])
         else:
-            st.line_chart(df_hist[['power']])
+            st.line_chart(df_chart[['power']])
         
         if show_forecast:
             st.markdown("---")
-            st.markdown("### 📅 Monthly Forecast Projection")
+            # --- MODIFIED LAYOUT FOR MONTHLY FORECAST HEADER ---
+            fc_col1, fc_col2 = st.columns([3, 1])
+            with fc_col1:
+                st.markdown("### 📅 Monthly Forecast Projection")
+            with fc_col2:
+                st.markdown(f"**Selected Range:** {duration_days} days")
+                
             monthly_kwh, monthly_peso = forecast_monthly(df_hist, duration_days, interval)
             col_f1, col_f2 = st.columns(2)
             col_f1.metric("Projected Monthly kWh", f"{monthly_kwh:.2f}")
@@ -253,17 +267,17 @@ if not df_hist.empty and show_graphs:
 
     with tab2:
         c1, c2 = st.columns(2)
-        c1.line_chart(df_hist['voltage'])
+        c1.line_chart(df_chart['voltage'])
         c1.caption("Voltage (V)")
-        c1.line_chart(df_hist['pf'])
+        c1.line_chart(df_chart['pf'])
         c1.caption("Power Factor")
-        c2.line_chart(df_hist['current'])
+        c2.line_chart(df_chart['current'])
         c2.caption("Current (A)")
-        c2.line_chart(df_hist['frequency'])
+        c2.line_chart(df_chart['frequency'])
         c2.caption("Frequency (Hz)")
 
     with tab3:
-        st.line_chart(df_hist['energy_kwh'])
+        st.line_chart(df_chart['energy_kwh'])
         st.caption("Cumulative Energy (kWh)")
 
 # --- BOTTOM DASHBOARD (Forecast) ---
@@ -307,6 +321,9 @@ if enable_forecast:
         if not df_forecast.empty:
             # Layout: Left = Graph, Right = Analysis
             col_main, col_metrics = st.columns([2, 1])
+            
+            # Use standard datetime index
+            df_forecast_chart = df_forecast.copy()
             
             # --- VALIDATION MODE (Actual Data Exists) ---
             if not df_actual_forecast.empty:
@@ -362,13 +379,13 @@ if enable_forecast:
 
                 else:
                     st.warning("Timestamps do not align. Showing forecast only.")
-                    st.line_chart(df_forecast)
+                    st.line_chart(df_forecast_chart)
 
             # --- PURE FORECAST MODE (No Actual Data) ---
             else:
                 with col_main:
                     st.subheader(f"Future Forecast: {forecast_start} to {forecast_end}")
-                    st.line_chart(df_forecast)
+                    st.line_chart(df_forecast_chart)
                     
                     # Detailed Forecast Table
                     with st.expander("📋 View Forecast Data Table", expanded=True):
