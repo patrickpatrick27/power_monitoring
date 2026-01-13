@@ -24,18 +24,16 @@ TIMESTEPS = 5  # Match your training config
 PESO_PER_KWH = 13  # Average rate (PHP)
 ASSUMED_RECORDING_INTERVAL = 60  # Seconds
 
-# --- LOAD MODELS (Cached for performance) ---
+# --- LOAD MODELS (LSTM ONLY) ---
 @st.cache_resource
 def load_models():
-    # Ensure these files exist in your 'models/' directory
+    # Only loading the necessary LSTM model and scalers
     scaler_X = joblib.load("models/scaler_X.pkl")
     scaler_y = joblib.load("models/scaler_y.pkl")
-    rf = joblib.load("models/random_forest.pkl")
-    xgb = joblib.load("models/xgboost.pkl")
     lstm = load_model("models/lstm_model.keras")
-    return scaler_X, scaler_y, rf, xgb, lstm
+    return scaler_X, scaler_y, lstm
 
-scaler_X, scaler_y, rf_model, xgb_model, lstm_model = load_models()
+scaler_X, scaler_y, lstm_model = load_models()
 
 # --- 1. GET LIVE VALUES FOR ALL FEATURES + POWER ---
 def get_live_values():
@@ -75,6 +73,7 @@ def get_recent_data(timesteps=TIMESTEPS):
             data[feature] = [0.0] * timesteps
 
     df = pd.DataFrame(data)
+    # Pad if not enough data points
     if len(df) < timesteps:
         pad = pd.DataFrame({f: [df[f].mean() if len(df) > 0 else 0.0] * (timesteps - len(df)) for f in FEATURES})
         df = pd.concat([pad, df], ignore_index=True)
@@ -100,15 +99,7 @@ def get_full_history_data(start_date, end_date, interval):
     df = df.apply(pd.to_numeric, errors='coerce').dropna()
     return df
 
-# --- 5. PREDICT WITH TREE MODELS (RF/XGB) ---
-def predict_with_tree(model, features_dict, scaler_X, scaler_y):
-    X = np.array([[features_dict[f] for f in FEATURES]])
-    X_scaled = scaler_X.transform(X)
-    y_scaled = model.predict(X_scaled)
-    y = scaler_y.inverse_transform(y_scaled.reshape(-1, 1))[0][0]
-    return max(0, y)
-
-# --- 6. PREDICT WITH LSTM (Next step forecast) ---
+# --- 5. PREDICT WITH LSTM (Current Moment) ---
 def predict_with_lstm(recent_df, scaler_X, scaler_y):
     X = recent_df.values
     X_scaled = scaler_X.transform(X)
@@ -117,7 +108,7 @@ def predict_with_lstm(recent_df, scaler_X, scaler_y):
     y = scaler_y.inverse_transform(y_scaled)[0][0]
     return max(0, y)
 
-# --- 6.5 FORECAST NEXT PERIOD WITH LSTM ---
+# --- 6. FORECAST NEXT PERIOD WITH LSTM (Future) ---
 def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
     if len(df_past) < TIMESTEPS:
         return pd.DataFrame()
@@ -139,11 +130,13 @@ def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler
         y_scaled = lstm_model.predict(X_lstm, verbose=0)
         pred_power = max(0, scaler_y.inverse_transform(y_scaled)[0][0])
         
+        # Approximate next state for features based on predicted power
         interval_hours = interval_sec / 3600.0
         new_current = pred_power / (voltage_const * pf_const) if voltage_const * pf_const > 0 else current_last
         new_energy = energy_last + (pred_power * interval_hours / 1000.0)
         new_row = np.array([voltage_const, new_current, new_energy, pf_const, frequency_const])
         
+        # Update sliding window
         recent_features = np.vstack((recent_features[1:], new_row.reshape(1, -1)))
         current_last = new_current
         energy_last = new_energy
@@ -169,8 +162,7 @@ st.set_page_config(page_title="Power Monitoring", page_icon="⚡", layout="wide"
 st.title("⚡ Smart Home Energy Tracker")
 
 # Sidebar
-st.sidebar.header("Interact & Predict")
-selected_model = st.sidebar.selectbox("Select Model", ["Random Forest", "XGBoost", "LSTM"])
+st.sidebar.header("Configuration")
 use_live_data = st.sidebar.checkbox("Use Live Data", value=True)
 
 st.sidebar.subheader("Select Date Range")
@@ -184,7 +176,7 @@ if start_date > end_date:
 duration_days = (end_date - start_date).days + 1
 selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
 
-# Dynamic interval
+# Dynamic interval for plotting
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
 
@@ -223,15 +215,17 @@ if enable_forecast:
 
 st.sidebar.subheader("Filter Views")
 show_params = st.sidebar.checkbox("Show Parameters", value=True)
-show_predictions = st.sidebar.checkbox("Show Model Predictions", value=False)
+show_predictions = st.sidebar.checkbox("Show Model Predictions (Graph)", value=False)
 show_graphs = st.sidebar.checkbox("Show Graphs", value=True)
 show_forecast = st.sidebar.checkbox("Show Monthly Forecast", value=True)
 
-# Fetch Data
+# Fetch Data & Setup Features
 if use_live_data:
     live_values = get_live_values()
     features_dict = {k: v for k, v in live_values.items() if k in FEATURES}
     live_power = live_values.get("power", 0.0)
+    # Get sequence for LSTM
+    recent_df = get_recent_data()
 else:
     live_values = {}
     voltage = st.sidebar.slider("Voltage", 0.0, 300.0, 240.0)
@@ -244,10 +238,14 @@ else:
         "voltage": voltage, "current": current, "energy_kwh": energy_kwh,
         "pf": pf, "frequency": frequency
     }
+    # Create artificial sequence for LSTM manual testing (repeating same values)
+    recent_df = pd.DataFrame([features_dict] * TIMESTEPS)
 
+# --- Historical Data Fetching ---
 with st.spinner('Fetching historical data...'):
     df_hist = get_full_history_data(datetime.combine(start_date, datetime.min.time()), datetime.combine(end_date, datetime.max.time()), interval)
 
+# --- Forecasting Data Fetching ---
 df_past = pd.DataFrame()
 df_actual_forecast = pd.DataFrame()
 if enable_forecast:
@@ -267,20 +265,10 @@ if enable_forecast:
         st.warning("Insufficient data for forecasting. Check date range or API.")
         enable_forecast = False
 
-if use_live_data and selected_model == "LSTM":
-    recent_df = get_recent_data()
-else:
-    recent_df = pd.DataFrame([features_dict] * TIMESTEPS) if not use_live_data else None
+# --- Instant Prediction (LSTM) ---
+pred_power = predict_with_lstm(recent_df, scaler_X, scaler_y)
 
-# --- Predictions ---
-if selected_model == "Random Forest":
-    pred_power = predict_with_tree(rf_model, features_dict, scaler_X, scaler_y)
-elif selected_model == "XGBoost":
-    pred_power = predict_with_tree(xgb_model, features_dict, scaler_X, scaler_y)
-else:
-    pred_power = predict_with_lstm(recent_df, scaler_X, scaler_y)
-
-# --- Forecast Next Period ---
+# --- Forecast Next Period (LSTM) ---
 df_forecast = pd.DataFrame()
 if enable_forecast and not df_past.empty:
     num_steps = len(df_actual_forecast)
@@ -296,7 +284,7 @@ if show_params:
         cols[i % 3].metric(p.capitalize().replace("_kwh", " (kWh)"), f"{value:.2f}")
 
 # --- User Recommendations ---
-st.subheader("🤖 User Recommendations")
+st.subheader("🤖 AI Analysis")
 if pred_power > 1500:
     st.error("⚠️ **High Load Predicted:** Heavy appliances may be active (>1.5kW).")
 elif pred_power > 200:
@@ -309,23 +297,21 @@ if not df_hist.empty and show_graphs:
     st.subheader(f"📊 Historical Trends ({selected_range_label})")
     
     predicted_col_exists = False
+    
+    # Generate Historical Predictions for Graph if enabled
     if show_predictions:
-        if selected_model in ["Random Forest", "XGBoost"]:
-            model = rf_model if selected_model == "Random Forest" else xgb_model
-            X = df_hist[FEATURES].values
-            if len(X) > 0:
-                X_scaled = scaler_X.transform(X)
-                y_scaled = model.predict(X_scaled)
-                y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
-                df_hist['predicted'] = [max(0, p) for p in y_pred]
-                predicted_col_exists = True
-        else:
-            X = df_hist[FEATURES].values
-            if len(X) >= TIMESTEPS:
-                X_scaled = scaler_X.transform(X)
-                Xs = np.array([X_scaled[i:i + TIMESTEPS] for i in range(len(X_scaled) - TIMESTEPS)])
+        X = df_hist[FEATURES].values
+        if len(X) >= TIMESTEPS:
+            # Create sliding windows for LSTM prediction on history
+            X_scaled = scaler_X.transform(X)
+            # We need sequences of length TIMESTEPS
+            Xs = np.array([X_scaled[i:i + TIMESTEPS] for i in range(len(X_scaled) - TIMESTEPS)])
+            
+            if len(Xs) > 0:
                 y_scaled = lstm_model.predict(Xs, verbose=0)
                 y_pred = scaler_y.inverse_transform(y_scaled).flatten()
+                
+                # Align predictions (LSTM output is shifted by TIMESTEPS)
                 df_hist['predicted'] = np.nan
                 df_hist.iloc[TIMESTEPS:, df_hist.columns.get_loc('predicted')] = [max(0, p) for p in y_pred]
                 predicted_col_exists = True
