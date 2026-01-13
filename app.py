@@ -142,7 +142,7 @@ with st.sidebar.expander("📅 Date Range Settings", expanded=True):
     use_live_data = st.checkbox("Use Live Data", value=True)
 
 # 2. Forecasting Settings
-with st.sidebar.expander("🔮 Forecasting Setup", expanded=False):
+with st.sidebar.expander("⚡ Forecasting Setup", expanded=False):
     enable_forecast = st.checkbox("Enable Next Period Forecast", value=False)
     if enable_forecast:
         forecast_period = st.selectbox("Forecast Period", ["Daily", "Weekly", "Monthly"])
@@ -171,7 +171,7 @@ with st.sidebar.expander("🔮 Forecasting Setup", expanded=False):
         st.caption(f"Target: {forecast_start} to {forecast_end}")
 
 # 3. View Filters
-with st.sidebar.expander("👁️ View Options", expanded=False):
+with st.sidebar.expander("⚙️ View Options", expanded=False):
     show_params = st.checkbox("Show Parameters", value=True)
     show_predictions = st.checkbox("Show RF Predictions on Graph", value=False)
     show_graphs = st.checkbox("Show Historical Graphs", value=True)
@@ -212,7 +212,7 @@ if show_params:
         val = live_values.get(p, 0.0) if use_live_data else features_dict.get(p, live_power if p == "power" else 0.0)
         cols[i % 3].metric(p.capitalize().replace("_kwh", " (kWh)"), f"{val:.2f}")
 
-st.subheader("🤖 AI Load Analysis")
+st.subheader("Load Analysis")
 if pred_power > 1500:
     st.error(f"⚠️ **High Load:** Predicted {pred_power:.1f}W. Heavy appliances likely active.")
 elif pred_power > 200:
@@ -269,7 +269,7 @@ if not df_hist.empty and show_graphs:
 # --- BOTTOM DASHBOARD (Forecast) ---
 if enable_forecast:
     st.markdown("---")
-    st.header(f"🔮 Intelligent Forecast: Next {period_label}")
+    st.header(f"⚡ Power Forecast: Next {period_label}")
     
     df_past = pd.DataFrame()
     df_actual_forecast = pd.DataFrame()
