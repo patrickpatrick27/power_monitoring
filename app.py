@@ -87,7 +87,7 @@ def predict_with_rf(features_dict, scaler_X, scaler_y):
     return max(0, y)
 
 # --- 5. FORECAST NEXT PERIOD WITH LSTM (Future Sequence) ---
-def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler_y):
+def forecast_next_period_lstm(df_past, num_steps, interval_sec, start_time_future, scaler_X, scaler_y):
     if len(df_past) < TIMESTEPS:
         return pd.DataFrame()
     
@@ -100,7 +100,9 @@ def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler
     
     recent_features = df_past[FEATURES].tail(TIMESTEPS).values
     predictions = []
-    current_time = df_past.index[-1] + timedelta(seconds=interval_sec)
+    
+    # Start predicting from the specified future time
+    current_time = start_time_future
     
     for _ in range(num_steps):
         X_scaled = scaler_X.transform(recent_features)
@@ -150,42 +152,38 @@ if start_date > end_date:
 duration_days = (end_date - start_date).days + 1
 selected_range_label = f"{start_date} to {end_date} ({duration_days} days)"
 
-# Dynamic interval for plotting
+# Dynamic interval
 total_seconds = (datetime.combine(end_date, datetime.max.time()) - datetime.combine(start_date, datetime.min.time())).total_seconds()
 interval = max(60, int(total_seconds / 100))
 
 st.sidebar.subheader("Forecast Next Period (LSTM)")
 enable_forecast = st.sidebar.checkbox("Enable Next Period Forecast", value=False)
+
 if enable_forecast:
-    forecast_period = st.sidebar.selectbox("Forecast Period", ["Daily", "Weekly", "Monthly", "Yearly"])
-    past_start = st.sidebar.date_input("Start of Past Period", value=date(2025, 12, 1))
+    forecast_period = st.sidebar.selectbox("Forecast Period", ["Daily", "Weekly", "Monthly"])
+    past_start = st.sidebar.date_input("Start of Past Period (Input)", value=date.today() - timedelta(days=1))
     
+    # Calculate Dates
     if forecast_period == "Daily":
         past_end = past_start
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start
-        forecast_interval = 3600
+        forecast_interval = 3600  # Hourly resolution
         period_label = "Day"
     elif forecast_period == "Weekly":
         past_end = past_start + timedelta(days=6)
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start + timedelta(days=6)
-        forecast_interval = 3600 * 4
+        forecast_interval = 3600 * 4 # 4-hour resolution
         period_label = "Week"
-    elif forecast_period == "Monthly":
+    else: # Monthly
         past_end = past_start + relativedelta(months=1, days=-1)
         forecast_start = past_end + timedelta(days=1)
         forecast_end = forecast_start + relativedelta(months=1, days=-1)
-        forecast_interval = 86400
+        forecast_interval = 86400 # Daily resolution
         period_label = "Month"
-    else:
-        past_end = past_start + relativedelta(years=1, days=-1)
-        forecast_start = past_end + timedelta(days=1)
-        forecast_end = forecast_start + relativedelta(years=1, days=-1)
-        forecast_interval = 86400 * 30
-        period_label = "Year"
     
-    st.sidebar.info(f"Predicting next {forecast_period.lower()} ({forecast_start} to {forecast_end}) based on {past_start} to {past_end}")
+    st.sidebar.info(f"Using input from {past_start} to {past_end}\nTo predict: {forecast_start} to {forecast_end}")
 
 st.sidebar.subheader("Filter Views")
 show_params = st.sidebar.checkbox("Show Parameters", value=True)
@@ -193,7 +191,7 @@ show_predictions = st.sidebar.checkbox("Show Model Predictions (Graph)", value=F
 show_graphs = st.sidebar.checkbox("Show Graphs", value=True)
 show_forecast = st.sidebar.checkbox("Show Monthly Forecast", value=True)
 
-# Fetch Data
+# Fetch Live/Simulated Data
 if use_live_data:
     live_values = get_live_values()
     features_dict = {k: v for k, v in live_values.items() if k in FEATURES}
@@ -218,32 +216,48 @@ with st.spinner('Fetching historical data...'):
 # --- Forecasting Data Fetching ---
 df_past = pd.DataFrame()
 df_actual_forecast = pd.DataFrame()
+
 if enable_forecast:
-    with st.spinner('Fetching past period data...'):
+    with st.spinner('Fetching input data for forecast...'):
         df_past = get_full_history_data(
             datetime.combine(past_start, datetime.min.time()),
             datetime.combine(past_end, datetime.max.time()),
             forecast_interval
         )
-    with st.spinner('Fetching actual forecast period data...'):
+    
+    # Try to fetch actual data (for validation), but don't fail if empty
+    with st.spinner('Checking for existing data...'):
         df_actual_forecast = get_full_history_data(
             datetime.combine(forecast_start, datetime.min.time()),
             datetime.combine(forecast_end, datetime.max.time()),
             forecast_interval
         )
-    if df_past.empty or df_actual_forecast.empty:
-        st.warning("Insufficient data for forecasting. Check date range or API.")
+    
+    if df_past.empty:
+        st.warning(f"No input data found for {past_start} to {past_end}. Cannot generate forecast.")
         enable_forecast = False
 
-# --- Instant Prediction (Random Forest) ---
+# --- Instant Prediction (RF) ---
 pred_power = predict_with_rf(features_dict, scaler_X, scaler_y)
 
 # --- Forecast Next Period (LSTM) ---
 df_forecast = pd.DataFrame()
 if enable_forecast and not df_past.empty:
-    num_steps = len(df_actual_forecast)
-    with st.spinner('Generating forecast with LSTM...'):
-        df_forecast = forecast_next_period_lstm(df_past, num_steps, forecast_interval, scaler_X, scaler_y)
+    with st.spinner('Generating future forecast...'):
+        # Calculate how many steps to predict
+        if not df_actual_forecast.empty:
+            num_steps = len(df_actual_forecast)
+        else:
+            # If no actual data, calculate steps mathematically based on time range
+            start_dt = datetime.combine(forecast_start, datetime.min.time())
+            end_dt = datetime.combine(forecast_end, datetime.max.time())
+            total_duration_sec = (end_dt - start_dt).total_seconds()
+            num_steps = int(total_duration_sec / forecast_interval)
+        
+        # Determine start time for the plot
+        start_time_future = datetime.combine(forecast_start, datetime.min.time())
+        
+        df_forecast = forecast_next_period_lstm(df_past, num_steps, forecast_interval, start_time_future, scaler_X, scaler_y)
 
 # --- Display Parameters ---
 if show_params:
@@ -268,14 +282,12 @@ if not df_hist.empty and show_graphs:
     
     predicted_col_exists = False
     
-    # Generate Historical Predictions for Graph using RF
     if show_predictions:
         X = df_hist[FEATURES].values
         if len(X) > 0:
             X_scaled = scaler_X.transform(X)
             y_scaled = rf_model.predict(X_scaled)
             y_pred = scaler_y.inverse_transform(y_scaled.reshape(-1, 1)).flatten()
-            
             df_hist['predicted'] = [max(0, p) for p in y_pred]
             predicted_col_exists = True
 
@@ -294,9 +306,8 @@ if not df_hist.empty and show_graphs:
         else:
             st.line_chart(df_hist[['power']])
         
-        # --- Monthly Forecast (Moved Inside Tab 1) ---
         if show_forecast:
-            st.markdown("---")  # Divider
+            st.markdown("---")
             st.markdown("### 📅 Monthly Forecast Projection")
             monthly_kwh, monthly_peso = forecast_monthly(df_hist, duration_days, interval)
             col_f1, col_f2 = st.columns(2)
@@ -323,42 +334,52 @@ if not df_hist.empty and show_graphs:
 
     with tab4:
         if not df_forecast.empty:
-            st.markdown(f"### 📉 Forecast Accuracy Analysis (Next {period_label}) - LSTM")
+            st.markdown(f"### 🔮 Forecast: {forecast_start} to {forecast_end}")
             
-            # Align Data
-            compare_df = df_actual_forecast[['power']].join(df_forecast, how='inner').dropna()
-            compare_df.columns = ['Actual Power', 'Predicted Power']
-            
-            if not compare_df.empty:
-                y_true = compare_df['Actual Power']
-                y_pred = compare_df['Predicted Power']
+            # --- SCENARIO 1: Future Forecast (No actual data yet) ---
+            if df_actual_forecast.empty:
+                st.info("Showing pure future forecast. No actual data available for validation yet.")
+                st.line_chart(df_forecast)
                 
-                # Calculate Error Metrics
-                mae = np.mean(np.abs(y_true - y_pred))
-                rmse = np.sqrt(np.mean((y_true - y_pred)**2))
-                
-                # MAPE (Handle division by zero)
-                non_zero_mask = y_true != 0
-                if np.sum(non_zero_mask) > 0:
-                    mape = np.mean(np.abs((y_true[non_zero_mask] - y_pred[non_zero_mask]) / y_true[non_zero_mask])) * 100
-                else:
-                    mape = 0.0
+                # Show predicted stats
+                avg_future_p = df_forecast['predicted_power'].mean()
+                peak_future_p = df_forecast['predicted_power'].max()
+                st.metric("Predicted Avg Power", f"{avg_future_p:.2f} W")
+                st.metric("Predicted Peak Power", f"{peak_future_p:.2f} W")
 
-                # Display Metrics
-                st.markdown("#### Performance Metrics")
-                m_col1, m_col2, m_col3 = st.columns(3)
-                m_col1.metric("Mean Abs. Error (MAE)", f"{mae:.2f} W", help="Avg error in Watts")
-                m_col2.metric("RMSE", f"{rmse:.2f} W", help="Penalizes large spikes")
-                m_col3.metric("Mean Abs. % Error (MAPE)", f"{mape:.2f} %", help="Avg % difference")
-
-                st.line_chart(compare_df)
-                
-                with st.expander("View Detailed Data Table"):
-                    compare_df['Error (W)'] = compare_df['Actual Power'] - compare_df['Predicted Power']
-                    compare_df['% Error'] = (compare_df['Error (W)'] / compare_df['Actual Power']) * 100
-                    st.dataframe(compare_df.style.format("{:.2f}"))
+            # --- SCENARIO 2: Past Validation (Actual data exists) ---
             else:
-                st.warning("Timestamps do not align. Cannot calculate error.")
+                # Align Data
+                compare_df = df_actual_forecast[['power']].join(df_forecast, how='inner').dropna()
+                compare_df.columns = ['Actual Power', 'Predicted Power']
+                
+                if not compare_df.empty:
+                    y_true = compare_df['Actual Power']
+                    y_pred = compare_df['Predicted Power']
+                    
+                    # Metrics
+                    mae = np.mean(np.abs(y_true - y_pred))
+                    rmse = np.sqrt(np.mean((y_true - y_pred)**2))
+                    non_zero_mask = y_true != 0
+                    if np.sum(non_zero_mask) > 0:
+                        mape = np.mean(np.abs((y_true[non_zero_mask] - y_pred[non_zero_mask]) / y_true[non_zero_mask])) * 100
+                    else:
+                        mape = 0.0
+
+                    st.markdown("#### Performance Metrics")
+                    m_col1, m_col2, m_col3 = st.columns(3)
+                    m_col1.metric("MAE", f"{mae:.2f} W")
+                    m_col2.metric("RMSE", f"{rmse:.2f} W")
+                    m_col3.metric("MAPE", f"{mape:.2f} %")
+
+                    st.line_chart(compare_df)
+                    
+                    with st.expander("View Comparison Table"):
+                        compare_df['Error'] = compare_df['Actual Power'] - compare_df['Predicted Power']
+                        st.dataframe(compare_df.style.format("{:.2f}"))
+                else:
+                    st.warning("Timestamps do not align. Showing forecast only.")
+                    st.line_chart(df_forecast)
         else:
             st.info("Select dates and enable forecast to view.")
 
