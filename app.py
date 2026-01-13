@@ -127,7 +127,7 @@ def forecast_monthly(df_hist, duration_days, interval):
 
 # --- UI START ---
 st.set_page_config(page_title="Power Monitoring", page_icon="⚡", layout="wide")
-st.title("⚡ Smart Home Energy Tracker")
+st.title("⚡ Home Energy Monitoring Website")
 
 # --- SIDEBAR ---
 st.sidebar.header("Configuration")
