@@ -29,7 +29,6 @@ ASSUMED_RECORDING_INTERVAL = 60  # Seconds
 def load_models():
     scaler_X = joblib.load("models/scaler_X.pkl")
     scaler_y = joblib.load("models/scaler_y.pkl")
-    # Load BOTH models now
     rf = joblib.load("models/random_forest.pkl")
     lstm = load_model("models/lstm_model.keras")
     return scaler_X, scaler_y, rf, lstm
@@ -81,10 +80,8 @@ def get_full_history_data(start_date, end_date, interval):
 
 # --- 4. PREDICT WITH RANDOM FOREST (Instant) ---
 def predict_with_rf(features_dict, scaler_X, scaler_y):
-    # Prepare input vector
     X = np.array([[features_dict[f] for f in FEATURES]])
     X_scaled = scaler_X.transform(X)
-    # Predict
     y_scaled = rf_model.predict(X_scaled)
     y = scaler_y.inverse_transform(y_scaled.reshape(-1, 1))[0][0]
     return max(0, y)
@@ -94,7 +91,6 @@ def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler
     if len(df_past) < TIMESTEPS:
         return pd.DataFrame()
     
-    # Get initial state from the end of the past data
     last_row = df_past.iloc[-1]
     voltage_const = last_row['voltage']
     pf_const = last_row['pf']
@@ -102,29 +98,21 @@ def forecast_next_period_lstm(df_past, num_steps, interval_sec, scaler_X, scaler
     current_last = last_row['current']
     energy_last = last_row['energy_kwh']
     
-    # Prepare the initial sequence for LSTM
     recent_features = df_past[FEATURES].tail(TIMESTEPS).values
     predictions = []
     current_time = df_past.index[-1] + timedelta(seconds=interval_sec)
     
     for _ in range(num_steps):
-        # Scale and Reshape for LSTM
         X_scaled = scaler_X.transform(recent_features)
         X_lstm = X_scaled.reshape(1, TIMESTEPS, len(FEATURES))
-        
-        # Predict Power
         y_scaled = lstm_model.predict(X_lstm, verbose=0)
         pred_power = max(0, scaler_y.inverse_transform(y_scaled)[0][0])
         
-        # Estimate next state of features
         interval_hours = interval_sec / 3600.0
-        # P = V * I * PF -> I = P / (V * PF)
         new_current = pred_power / (voltage_const * pf_const) if voltage_const * pf_const > 0 else current_last
         new_energy = energy_last + (pred_power * interval_hours / 1000.0)
-        
         new_row = np.array([voltage_const, new_current, new_energy, pf_const, frequency_const])
         
-        # Update sliding window
         recent_features = np.vstack((recent_features[1:], new_row.reshape(1, -1)))
         
         predictions.append((current_time, pred_power))
@@ -248,11 +236,9 @@ if enable_forecast:
         enable_forecast = False
 
 # --- Instant Prediction (Random Forest) ---
-# We use RF here because it's better for instantaneous mapping
 pred_power = predict_with_rf(features_dict, scaler_X, scaler_y)
 
 # --- Forecast Next Period (LSTM) ---
-# We use LSTM here because it handles time-series sequences
 df_forecast = pd.DataFrame()
 if enable_forecast and not df_past.empty:
     num_steps = len(df_actual_forecast)
@@ -268,7 +254,7 @@ if show_params:
         cols[i % 3].metric(p.capitalize().replace("_kwh", " (kWh)"), f"{value:.2f}")
 
 # --- User Recommendations ---
-st.subheader("🤖 Analysis (RF Model)")
+st.subheader("🤖 AI Analysis (RF Model)")
 if pred_power > 1500:
     st.error("⚠️ **High Load Predicted:** Heavy appliances may be active (>1.5kW).")
 elif pred_power > 200:
@@ -283,7 +269,6 @@ if not df_hist.empty and show_graphs:
     predicted_col_exists = False
     
     # Generate Historical Predictions for Graph using RF
-    # RF is much faster for batch processing historical rows than LSTM
     if show_predictions:
         X = df_hist[FEATURES].values
         if len(X) > 0:
@@ -308,6 +293,16 @@ if not df_hist.empty and show_graphs:
             st.line_chart(df_hist[['power', 'predicted']])
         else:
             st.line_chart(df_hist[['power']])
+        
+        # --- Monthly Forecast (Moved Inside Tab 1) ---
+        if show_forecast:
+            st.markdown("---")  # Divider
+            st.markdown("### 📅 Monthly Forecast Projection")
+            monthly_kwh, monthly_peso = forecast_monthly(df_hist, duration_days, interval)
+            col_f1, col_f2 = st.columns(2)
+            col_f1.metric("Projected Monthly kWh", f"{monthly_kwh:.2f}")
+            col_f2.metric("Projected Monthly Cost (PHP)", f"{monthly_peso:.2f}")
+            st.caption(f"Based on selected range. Assumes usage pattern repeats for 30 days at {PESO_PER_KWH} PHP/kWh.")
 
     with tab2:
         col_g1, col_g2 = st.columns(2)
@@ -369,12 +364,3 @@ if not df_hist.empty and show_graphs:
 
 else:
     st.info("No history data available for the selected range.")
-
-# --- Monthly Forecast ---
-if show_forecast and not df_hist.empty:
-    st.subheader("📅 Monthly Forecast")
-    monthly_kwh, monthly_peso = forecast_monthly(df_hist, duration_days, interval)
-    col_f1, col_f2 = st.columns(2)
-    col_f1.metric("Projected Monthly kWh", f"{monthly_kwh:.2f}")
-    col_f2.metric("Projected Monthly Cost (PHP)", f"{monthly_peso:.2f}")
-    st.info(f"Assumption: Usage repeats for 30 days at {PESO_PER_KWH} PHP/kWh.")
